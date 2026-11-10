@@ -1,3 +1,4 @@
 node_modules
 popup.js
+*.woff2
 .claude

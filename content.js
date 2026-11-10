@@ -9,15 +9,28 @@ const DEFAULTS = {
   speed: 1,
   preservePitch: false,
   reverb: 0,
-  eq: [0, 0, 0, 0, 0],
+  room: "hall",
+  bass: 0,
+  treble: 0,
 };
-const EQ_FREQS = [60, 250, 1000, 4000, 12000];
+// Room type = impulse response length / decay curve.
+const ROOMS = {
+  chambre: { seconds: 1.5, decay: 3 },
+  hall: { seconds: 4, decay: 2 },
+  cathedrale: { seconds: 7, decay: 1.5 },
+};
 let settings = { ...DEFAULTS };
-let ctx, impulse;
-const wired = new WeakMap(); // el -> { eq: BiquadFilterNode[], wet: GainNode, dry: GainNode }
+let ctx;
+const impulses = {}; // room -> AudioBuffer, built lazily
+const wired = new WeakMap(); // el -> { bass, treble, conv, wet, dry }
 
 const needsFx = () =>
-  settings.enabled && (settings.reverb > 0 || settings.eq.some((v) => v !== 0));
+  settings.enabled && (settings.reverb > 0 || settings.bass !== 0 || settings.treble !== 0);
+
+function getImpulse(room) {
+  const r = ROOMS[room] ? room : DEFAULTS.room;
+  return (impulses[r] ??= makeImpulse(getCtx(), ROOMS[r].seconds, ROOMS[r].decay));
+}
 
 function makeImpulse(ac, seconds = 4, decay = 2) {
   const len = ac.sampleRate * seconds;
@@ -37,7 +50,6 @@ function resume() {
 function getCtx() {
   if (ctx) return ctx;
   ctx = new AudioContext();
-  impulse = makeImpulse(ctx);
   // Autoplay policy: context may start suspended; resume on any gesture and keep retrying.
   for (const ev of ["pointerdown", "keydown", "touchstart"])
     document.addEventListener(ev, resume, { capture: true, passive: true });
@@ -75,29 +87,26 @@ function wire(el) {
     wired.set(el, null);
     return null;
   } // already captured by the page
-  const eq = EQ_FREQS.map((f) => {
-    const n = ac.createBiquadFilter();
-    n.type = "peaking";
-    n.frequency.value = f;
-    return n;
-  });
+  const bass = ac.createBiquadFilter();
+  bass.type = "lowshelf";
+  bass.frequency.value = 200;
+  const treble = ac.createBiquadFilter();
+  treble.type = "highshelf";
+  treble.frequency.value = 4000;
   const conv = ac.createConvolver();
-  conv.buffer = impulse;
+  conv.buffer = getImpulse(settings.room);
   const wet = ac.createGain();
   wet.gain.value = 0;
   const dry = ac.createGain();
   dry.gain.value = 1;
-  let node = src;
-  for (const n of eq) {
-    node.connect(n);
-    node = n;
-  }
-  node.connect(dry);
+  src.connect(bass);
+  bass.connect(treble);
+  treble.connect(dry);
   dry.connect(ac.destination);
-  node.connect(conv);
+  treble.connect(conv);
   conv.connect(wet);
   wet.connect(ac.destination);
-  const g = { eq, wet, dry };
+  const g = { bass, treble, conv, wet, dry };
   wired.set(el, g);
   resume();
   return g;
@@ -124,9 +133,10 @@ function apply(el) {
   if (!g) return;
   g.wet.gain.value = s.reverb * 1; // wet louder than 1:1 so 100% is clearly drenched
   g.dry.gain.value = 1 - s.reverb * 0.25; // pull the dry down as reverb rises
-  g.eq.forEach((n, i) => {
-    n.gain.value = s.eq[i];
-  });
+  g.bass.gain.value = s.bass;
+  g.treble.gain.value = s.treble;
+  const ir = getImpulse(s.room);
+  if (g.conv.buffer !== ir) g.conv.buffer = ir;
 }
 
 function attach(el) {
